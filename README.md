@@ -1,22 +1,32 @@
-# go-garmin
+# go-garminconnect
 
-`go-garmin` is a small, dependency-free Go client for reading Garmin Connect
-activities. It targets the undocumented Garmin Connect API, which can change
-at any time and is not affiliated with Garmin.
+`go-garminconnect` is a small, dependency-free Go client for reading Garmin
+Connect activities. It targets the undocumented Garmin Connect API, which can
+change at any time and is not affiliated with Garmin.
 
 ## Install
 
 ```sh
-go get github.com/se0/go-garmin
+go get github.com/se0wtf/go-garminconnect
 ```
 
 ## Usage
 
-Log in with your Garmin email and password, or provide an existing Bearer
-access token. Keep credentials and tokens out of source control and logs.
+Log in with your Garmin email and password, or resume a session from a secure
+token file. Keep credentials and tokens out of source control and logs.
 
 ```go
-client, err := garmin.Login(context.Background(), os.Getenv("GARMIN_EMAIL"), os.Getenv("GARMIN_PASSWORD"), nil)
+tokenFile := filepath.Join(configDir, "go-garminconnect", "tokens.json")
+client, err := garmin.NewClientFromTokenFile(tokenFile)
+if errors.Is(err, garmin.ErrNoTokenFile) || errors.Is(err, garmin.ErrSessionExpired) {
+	client, err = garmin.Login(
+		context.Background(),
+		os.Getenv("GARMIN_EMAIL"),
+		os.Getenv("GARMIN_PASSWORD"),
+		nil,
+		garmin.WithTokenFile(tokenFile),
+	)
+}
 if err != nil {
 	log.Fatal(err)
 }
@@ -29,13 +39,14 @@ activities, err := client.ListActivities(context.Background(), garmin.ListOption
 
 The public API covers activity listing and pagination, count, full summary and
 detail documents, and downloads in original/FIT archive, TCX, GPX, KML, and
-CSV formats. Full activity documents are returned as `json.RawMessage` because
-Garmin does not publish a stable schema for them.
+CSV formats. `GetDiveDetails` retrieves Garmin Dive-specific data. Full detail
+documents are returned as `json.RawMessage` because Garmin does not publish a
+stable schema for them.
 
 `Login` implements Garmin's undocumented mobile SSO flow. For an account with
-MFA, pass an `MFAProvider` that retrieves a one-time code. This flow is prone
-to change or bot challenges; callers can instead retain and pass an existing
-Bearer token with `NewClient`.
+MFA, pass an `MFAProvider` that retrieves a one-time code. `WithTokenFile`
+stores access and refresh tokens with owner-only permissions; clients resumed
+with `NewClientFromTokenFile` refresh expiring tokens automatically.
 
 ## Development
 

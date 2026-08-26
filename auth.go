@@ -67,6 +67,7 @@ func newUnauthenticatedClient(options ...Option) (*Client, error) {
 	baseURL, _ := url.Parse(defaultBaseURL)
 	c := &Client{
 		baseURL:    baseURL,
+		webURL:     mustParseURL("https://connect.garmin.com"),
 		httpClient: newDefaultHTTPClient(),
 		ssoURL:     mustParseURL("https://sso.garmin.com"),
 		tokenURL:   mustParseURL("https://diauth.garmin.com/di-oauth2-service/oauth/token"),
@@ -129,38 +130,59 @@ func (c *Client) verifyMFA(ctx context.Context, code string) (string, error) {
 }
 
 func (c *Client) exchangeTicket(ctx context.Context, ticket string) error {
-	form := url.Values{
-		"client_id":      {diClientID},
-		"service_ticket": {ticket},
-		"grant_type":     {diGrantType},
-		"service_url":    {c.serviceURL},
+	result, err := c.requestToken(ctx, diClientID, map[string]string{
+		"client_id":      diClientID,
+		"service_ticket": ticket,
+		"grant_type":     diGrantType,
+		"service_url":    c.serviceURL,
+	})
+	if err != nil {
+		return err
+	}
+	clientID := clientIDFromToken(result.AccessToken)
+	if clientID == "" {
+		clientID = diClientID
+	}
+	return c.setTokens(Tokens{
+		AccessToken:  result.AccessToken,
+		RefreshToken: result.RefreshToken,
+		ClientID:     clientID,
+	})
+}
+
+type tokenResponse struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+}
+
+func (c *Client) requestToken(ctx context.Context, clientID string, values map[string]string) (tokenResponse, error) {
+	form := url.Values{}
+	for key, value := range values {
+		form.Set(key, value)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.tokenURL.String(), strings.NewReader(form.Encode()))
 	if err != nil {
-		return fmt.Errorf("create token request: %w", err)
+		return tokenResponse{}, fmt.Errorf("create token request: %w", err)
 	}
-	req.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(diClientID+":")))
+	req.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(clientID+":")))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 	response, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("exchange Garmin service ticket: %w", err)
+		return tokenResponse{}, fmt.Errorf("request Garmin token: %w", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return newHTTPError(response)
+		return tokenResponse{}, newHTTPError(response)
 	}
-	var result struct {
-		AccessToken string `json:"access_token"`
-	}
+	var result tokenResponse
 	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
-		return fmt.Errorf("decode Garmin token response: %w", err)
+		return tokenResponse{}, fmt.Errorf("decode Garmin token response: %w", err)
 	}
 	if result.AccessToken == "" {
-		return errors.New("Garmin token response has no access token")
+		return tokenResponse{}, errors.New("Garmin token response has no access token")
 	}
-	c.accessToken = result.AccessToken
-	return nil
+	return result, nil
 }
 
 func (c *Client) postJSON(ctx context.Context, endpoint *url.URL, query url.Values, input any, headers map[string]string, output any) error {

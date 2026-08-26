@@ -43,10 +43,10 @@ func TestNewClientValidation(t *testing.T) {
 }
 
 func TestClientHTTPError(t *testing.T) {
-	client := testClient(t, func(w http.ResponseWriter, r *http.Request) { http.Error(w, "nope", http.StatusUnauthorized) })
+	client := testClient(t, func(w http.ResponseWriter, r *http.Request) { http.Error(w, "nope", http.StatusBadRequest) })
 	_, err := client.ActivityCount(context.Background())
 	var httpErr *HTTPError
-	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusUnauthorized || httpErr.Body != "nope" {
+	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusBadRequest || httpErr.Body != "nope" {
 		t.Fatalf("unexpected error: %#v", err)
 	}
 }

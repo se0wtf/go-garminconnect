@@ -1,3 +1,3 @@
-module github.com/se0/go-garmin
+module github.com/se0wtf/go-garminconnect
 
 go 1.22

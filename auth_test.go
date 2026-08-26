@@ -42,14 +42,14 @@ func TestLogin(t *testing.T) {
 			if r.Form.Get("service_ticket") != "ticket" {
 				t.Fatal("missing ticket")
 			}
-			_, _ = w.Write([]byte(`{"access_token":"access"}`))
+			_, _ = w.Write([]byte(`{"access_token":"access","refresh_token":"refresh"}`))
 		default:
 			t.Fatalf("unexpected path %s", r.URL.Path)
 		}
 	}))
 	defer server.Close()
 	client, err := Login(context.Background(), "runner@example.com", "correct", nil, testLoginOptions(server)...)
-	if err != nil || client.accessToken != "access" {
+	if err != nil || client.accessToken != "access" || client.refreshToken != "refresh" {
 		t.Fatalf("Login() = %#v, %v", client, err)
 	}
 }

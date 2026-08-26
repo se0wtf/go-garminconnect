@@ -24,4 +24,15 @@ func TestGarminIntegration(t *testing.T) {
 	if _, err := client.ListActivities(context.Background(), ListOptions{Limit: 1}); err != nil {
 		t.Fatal(err)
 	}
+	dives, err := client.ListActivities(context.Background(), ListOptions{Limit: 1, ActivityType: "diving"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dives) == 0 {
+		t.Log("account contains no dives; skipping live dive-detail request")
+		return
+	}
+	if _, err := client.GetDiveDetails(context.Background(), dives[0].ID); err != nil {
+		t.Fatal(err)
+	}
 }
