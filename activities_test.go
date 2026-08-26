@@ -22,7 +22,7 @@ func TestListActivities(t *testing.T) {
 		if got, want := r.URL.Query().Get("activityType"), "running"; got != want {
 			t.Errorf("type = %q", got)
 		}
-		_, _ = w.Write([]byte(`[{"activityId":7,"activityName":"Morning run","distance":1000,"activityTypeDTO":{"typeId":1,"typeKey":"running"}}]`))
+		_, _ = w.Write([]byte(`[{"activityId":7,"activityName":"Morning run","distance":1000,"activityType":{"typeId":1,"typeKey":"running"}}]`))
 	})
 	activities, err := client.ListActivities(context.Background(), ListOptions{Start: 4, Limit: 2, ActivityType: " running "})
 	if err != nil || len(activities) != 1 || activities[0].ID != 7 || activities[0].ActivityType.Key != "running" {

@@ -21,7 +21,7 @@ type Activity struct {
 	Description     string       `json:"description"`
 	StartTimeLocal  string       `json:"startTimeLocal"`
 	StartTimeGMT    string       `json:"startTimeGMT"`
-	ActivityType    ActivityType `json:"activityTypeDTO"`
+	ActivityType    ActivityType `json:"activityType"`
 	DistanceMeters  float64      `json:"distance"`
 	DurationSeconds float64      `json:"duration"`
 	MovingSeconds   float64      `json:"movingDuration"`
