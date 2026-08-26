@@ -89,12 +89,15 @@ func (c *Client) mobileLogin(ctx context.Context, email, password string) (strin
 		ResponseStatus struct {
 			Type string `json:"type"`
 		} `json:"responseStatus"`
+		CustomerMFAInfo struct {
+			LastMethodUsed string `json:"mfaLastMethodUsed"`
+		} `json:"customerMfaInfo"`
 		ServiceTicketID string `json:"serviceTicketId"`
 	}{}
 	query := url.Values{"clientId": {iosClientID}, "locale": {"en-US"}, "service": {c.serviceURL}}
 	if err := c.postJSON(ctx, c.ssoURL.JoinPath("mobile/api/login"), query, map[string]any{
 		"username": email, "password": password, "rememberMe": true, "captchaToken": "",
-	}, map[string]string{"Origin": c.ssoURL.String(), "User-Agent": iosUserAgent}, &response); err != nil {
+	}, c.mobileSSOHeaders(), &response); err != nil {
 		return "", err
 	}
 	switch response.ResponseStatus.Type {
@@ -106,6 +109,10 @@ func (c *Client) mobileLogin(ctx context.Context, email, password string) (strin
 	case "INVALID_USERNAME_PASSWORD":
 		return "", ErrInvalidCredentials
 	case "MFA_REQUIRED":
+		c.mfaMethod = response.CustomerMFAInfo.LastMethodUsed
+		if c.mfaMethod == "" {
+			c.mfaMethod = "email"
+		}
 		return "", ErrMFARequired
 	default:
 		return "", fmt.Errorf("Garmin login failed: %s", response.ResponseStatus.Type)
@@ -120,13 +127,27 @@ func (c *Client) verifyMFA(ctx context.Context, code string) (string, error) {
 		ServiceTicketID string `json:"serviceTicketId"`
 	}{}
 	query := url.Values{"clientId": {iosClientID}, "locale": {"en-US"}, "service": {c.serviceURL}}
-	if err := c.postJSON(ctx, c.ssoURL.JoinPath("mobile/api/mfa/verifyCode"), query, map[string]string{"mfaCode": code}, nil, &response); err != nil {
+	if err := c.postJSON(ctx, c.ssoURL.JoinPath("mobile/api/mfa/verifyCode"), query, map[string]any{
+		"mfaMethod":           c.mfaMethod,
+		"mfaVerificationCode": strings.TrimSpace(code),
+		"rememberMyBrowser":   true,
+		"reconsentList":       []string{},
+		"mfaSetup":            false,
+	}, c.mobileSSOHeaders(), &response); err != nil {
 		return "", err
 	}
 	if response.ResponseStatus.Type != "SUCCESSFUL" || response.ServiceTicketID == "" {
 		return "", ErrInvalidCredentials
 	}
 	return response.ServiceTicketID, nil
+}
+
+func (c *Client) mobileSSOHeaders() map[string]string {
+	return map[string]string{
+		"Accept":     "application/json, text/plain, */*",
+		"Origin":     c.ssoURL.String(),
+		"User-Agent": iosUserAgent,
+	}
 }
 
 func (c *Client) exchangeTicket(ctx context.Context, ticket string) error {

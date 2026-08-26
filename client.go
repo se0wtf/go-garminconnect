@@ -38,6 +38,7 @@ type Client struct {
 	ssoURL       *url.URL
 	tokenURL     *url.URL
 	serviceURL   string
+	mfaMethod    string
 }
 
 // WithWebBaseURL overrides the connect.garmin.com base URL used by web-only

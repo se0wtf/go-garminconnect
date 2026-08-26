@@ -58,12 +58,27 @@ func TestLoginMFA(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/mobile/api/login":
-			_, _ = w.Write([]byte(`{"responseStatus":{"type":"MFA_REQUIRED"}}`))
+			_, _ = w.Write([]byte(`{"responseStatus":{"type":"MFA_REQUIRED"},"customerMfaInfo":{"mfaLastMethodUsed":"email"}}`))
 		case "/mobile/api/mfa/verifyCode":
-			var body map[string]string
-			_ = json.NewDecoder(r.Body).Decode(&body)
-			if body["mfaCode"] != "123456" {
-				t.Fatal("bad MFA code")
+			var body struct {
+				Method            string   `json:"mfaMethod"`
+				VerificationCode  string   `json:"mfaVerificationCode"`
+				RememberMyBrowser bool     `json:"rememberMyBrowser"`
+				ReconsentList     []string `json:"reconsentList"`
+				Setup             bool     `json:"mfaSetup"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if body.Method != "email" || body.VerificationCode != "123456" || !body.RememberMyBrowser || body.ReconsentList == nil || body.Setup {
+				t.Fatalf("bad MFA payload: %#v", body)
+			}
+			testServerURL := "http://" + r.Host
+			if r.Header.Get("Origin") != testServerURL || r.Header.Get("User-Agent") != iosUserAgent {
+				t.Fatal("missing mobile SSO headers")
+			}
+			if r.URL.Query().Get("clientId") != iosClientID || r.URL.Query().Get("service") != testServerURL+"/gcm/ios" {
+				t.Fatal("bad MFA query")
 			}
 			_, _ = w.Write([]byte(`{"responseStatus":{"type":"SUCCESSFUL"},"serviceTicketId":"ticket"}`))
 		case "/di-oauth2-service/oauth/token":
@@ -71,7 +86,7 @@ func TestLoginMFA(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	client, err := Login(context.Background(), "runner@example.com", "correct", func(context.Context) (string, error) { return "123456", nil }, testLoginOptions(server)...)
+	client, err := Login(context.Background(), "runner@example.com", "correct", func(context.Context) (string, error) { return " 123456\n", nil }, testLoginOptions(server)...)
 	if err != nil || client.accessToken != "access" {
 		t.Fatalf("Login() = %#v, %v", client, err)
 	}
