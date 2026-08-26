@@ -38,7 +38,11 @@ type Client struct {
 	ssoURL       *url.URL
 	tokenURL     *url.URL
 	serviceURL   string
+	portalURL    string
+	authService  string
+	authFlow     string
 	mfaMethod    string
+	loginDelay   func(context.Context) error
 }
 
 // WithWebBaseURL overrides the connect.garmin.com base URL used by web-only
@@ -104,6 +108,8 @@ func NewClient(accessToken string, options ...Option) (*Client, error) {
 		ssoURL:      mustParseURL("https://sso.garmin.com"),
 		tokenURL:    mustParseURL("https://diauth.garmin.com/di-oauth2-service/oauth/token"),
 		serviceURL:  "https://mobile.integration.garmin.com/gcm/ios",
+		portalURL:   "https://connect.garmin.com/app",
+		loginDelay:  browserLoginDelay,
 	}
 	for _, option := range options {
 		if option == nil {
