@@ -34,9 +34,11 @@ var (
 // of logs and source control.
 type MFAProvider func(context.Context) (string, error)
 
-// Login authenticates with Garmin's mobile SSO flow and returns an activity
-// client. Garmin does not document this API, so it may stop working without
-// notice. When MFA is enabled, provider is called after Garmin requests a code.
+// Login authenticates with Garmin's browser SSO flow and returns an activity
+// client. It falls back to Garmin's mobile SSO flow when the browser endpoint
+// is unavailable. Garmin does not document these APIs, so they may stop working
+// without notice. When MFA is enabled, provider is called after Garmin requests
+// a code.
 func Login(ctx context.Context, email, password string, provider MFAProvider, options ...Option) (*Client, error) {
 	if strings.TrimSpace(email) == "" || password == "" {
 		return nil, errors.New("email and password must not be empty")
@@ -45,30 +47,47 @@ func Login(ctx context.Context, email, password string, provider MFAProvider, op
 	if err != nil {
 		return nil, err
 	}
-	ticket, err := c.mobileLogin(ctx, email, password)
-	if isBrowserFallbackError(err) {
-		ticket, err = c.portalLogin(ctx, email, password)
+	ticket, err := c.portalLogin(ctx, email, password)
+	if shouldFallBackFromPortal(ctx, err) {
+		ticket, err = c.mobileLogin(ctx, email, password)
 	}
-	if errors.Is(err, ErrMFARequired) {
-		if provider == nil {
-			return nil, ErrMFARequired
-		}
-		code, providerErr := provider(ctx)
-		if providerErr != nil {
-			return nil, fmt.Errorf("get MFA code: %w", providerErr)
-		}
-		if strings.TrimSpace(code) == "" {
-			return nil, errors.New("MFA code must not be empty")
-		}
-		ticket, err = c.verifyMFA(ctx, code)
-	}
+	ticket, err = c.resolveMFA(ctx, ticket, err, provider)
 	if err != nil {
 		return nil, err
 	}
-	if err := c.exchangeTicket(ctx, ticket); err != nil {
+	if c.authFlow == "portal" {
+		if err := c.exchangeTicket(ctx, ticket); err != nil {
+			return nil, err
+		}
+		webTicket, webErr := c.portalLogin(ctx, email, password)
+		webTicket, webErr = c.resolveMFA(ctx, webTicket, webErr, provider)
+		if webErr != nil {
+			return nil, fmt.Errorf("establish Garmin Dive session: %w", webErr)
+		}
+		if err := c.establishPortalSession(ctx, webTicket); err != nil {
+			return nil, err
+		}
+	} else if err := c.exchangeTicket(ctx, ticket); err != nil {
 		return nil, err
 	}
 	return c, nil
+}
+
+func (c *Client) resolveMFA(ctx context.Context, ticket string, err error, provider MFAProvider) (string, error) {
+	if !errors.Is(err, ErrMFARequired) {
+		return ticket, err
+	}
+	if provider == nil {
+		return "", ErrMFARequired
+	}
+	code, providerErr := provider(ctx)
+	if providerErr != nil {
+		return "", fmt.Errorf("get MFA code: %w", providerErr)
+	}
+	if strings.TrimSpace(code) == "" {
+		return "", errors.New("MFA code must not be empty")
+	}
+	return c.verifyMFA(ctx, code)
 }
 
 func newUnauthenticatedClient(options ...Option) (*Client, error) {
@@ -84,7 +103,7 @@ func newUnauthenticatedClient(options ...Option) (*Client, error) {
 		ssoURL:     mustParseURL("https://sso.garmin.com"),
 		tokenURL:   mustParseURL("https://diauth.garmin.com/di-oauth2-service/oauth/token"),
 		serviceURL: "https://mobile.integration.garmin.com/gcm/ios",
-		portalURL:  "https://connect.garmin.com/app",
+		portalURL:  "https://connect.garmin.com/app/",
 		loginDelay: browserLoginDelay,
 	}
 	for _, option := range options {
@@ -181,9 +200,8 @@ func (c *Client) completeLogin(response loginResponse, flow, service string) (st
 	}
 }
 
-func isBrowserFallbackError(err error) bool {
-	var httpError *HTTPError
-	return errors.As(err, &httpError) && (httpError.StatusCode == http.StatusTooManyRequests || httpError.StatusCode == http.StatusForbidden)
+func shouldFallBackFromPortal(ctx context.Context, err error) bool {
+	return err != nil && ctx.Err() == nil && !errors.Is(err, ErrInvalidCredentials) && !errors.Is(err, ErrMFARequired)
 }
 
 func browserLoginDelay(ctx context.Context) error {
@@ -269,6 +287,141 @@ func (c *Client) exchangeTicket(ctx context.Context, ticket string) error {
 		RefreshToken: result.RefreshToken,
 		ClientID:     clientID,
 	})
+}
+
+func (c *Client) establishPortalSession(ctx context.Context, ticket string) error {
+	service, err := url.Parse(c.authService)
+	if err != nil || service.Scheme == "" || service.Host == "" {
+		return errors.New("Garmin portal authentication service is invalid")
+	}
+	service.RawQuery = url.Values{"ticket": {ticket}}.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, service.String(), nil)
+	if err != nil {
+		return fmt.Errorf("create Garmin web session request: %w", err)
+	}
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	req.Header.Set("User-Agent", portalUserAgent)
+	response, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("establish Garmin web session: %w", err)
+	}
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		responseErr := newHTTPError(response)
+		response.Body.Close()
+		return fmt.Errorf("establish Garmin web session: %w", responseErr)
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, 2<<20))
+	response.Body.Close()
+	if err != nil {
+		return fmt.Errorf("read Garmin web session: %w", err)
+	}
+	csrfToken := extractCSRFToken(string(body))
+	if csrfToken == "" {
+		return errors.New("Garmin web session has no CSRF token")
+	}
+	c.tokenMu.Lock()
+	c.csrfToken = csrfToken
+	c.tokenMu.Unlock()
+	if !hasBrowserCookie(c.browserAuthenticationCookies(), "JWT_WEB") {
+		return errors.New("Garmin web session has no JWT_WEB cookie")
+	}
+	refresh := c.webURL.JoinPath("services/auth/token/di-oauth/refresh")
+	req, err = http.NewRequestWithContext(ctx, http.MethodPost, refresh.String(), strings.NewReader(""))
+	if err != nil {
+		return fmt.Errorf("create Garmin web session refresh request: %w", err)
+	}
+	req.Header.Set("Accept", "application/json, text/plain, */*")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Connect-Csrf-Token", csrfToken)
+	req.Header.Set("Origin", c.webURL.String())
+	req.Header.Set("Referer", c.webURL.JoinPath("app/").String())
+	req.Header.Set("User-Agent", portalUserAgent)
+	response, err = c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("refresh Garmin web session: %w", err)
+	}
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		responseErr := newHTTPError(response)
+		response.Body.Close()
+		return fmt.Errorf("refresh Garmin web session: %w", responseErr)
+	}
+	_, _ = io.Copy(io.Discard, response.Body)
+	response.Body.Close()
+	if err := c.reloadPortalSession(ctx); err != nil {
+		return err
+	}
+	browserCookies := c.browserAuthenticationCookies()
+	if len(browserCookies) == 0 {
+		return errors.New("Garmin web session refresh returned no authentication cookies")
+	}
+	tokens := c.Tokens()
+	tokens.BrowserCookies = browserCookies
+	return c.setTokens(tokens)
+}
+
+func (c *Client) reloadPortalSession(ctx context.Context) error {
+	page := c.webURL.JoinPath("app/")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, page.String(), nil)
+	if err != nil {
+		return fmt.Errorf("create Garmin web app request: %w", err)
+	}
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	req.Header.Set("User-Agent", portalUserAgent)
+	response, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("reload Garmin web session: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		return fmt.Errorf("reload Garmin web session: %w", newHTTPError(response))
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, 2<<20))
+	if err != nil {
+		return fmt.Errorf("read Garmin web app: %w", err)
+	}
+	if csrfToken := extractCSRFToken(string(body)); csrfToken != "" {
+		c.tokenMu.Lock()
+		c.csrfToken = csrfToken
+		c.tokenMu.Unlock()
+	}
+	return nil
+}
+
+func extractCSRFToken(page string) string {
+	const prefix = `meta name="csrf-token" content="`
+	start := strings.Index(page, prefix)
+	if start < 0 {
+		return ""
+	}
+	value := page[start+len(prefix):]
+	end := strings.IndexByte(value, '"')
+	if end < 0 {
+		return ""
+	}
+	return value[:end]
+}
+
+func (c *Client) browserAuthenticationCookies() []BrowserCookie {
+	if c.httpClient.Jar == nil {
+		return nil
+	}
+	allowed := map[string]bool{"JWT_WEB": true, "SESSIONID": true, "session": true}
+	var result []BrowserCookie
+	for _, cookie := range c.httpClient.Jar.Cookies(c.webURL) {
+		if allowed[cookie.Name] && cookie.Value != "" {
+			result = append(result, BrowserCookie{Name: cookie.Name, Value: cookie.Value})
+		}
+	}
+	return result
+}
+
+func hasBrowserCookie(cookies []BrowserCookie, name string) bool {
+	for _, cookie := range cookies {
+		if cookie.Name == name && cookie.Value != "" {
+			return true
+		}
+	}
+	return false
 }
 
 type tokenResponse struct {

@@ -7,6 +7,8 @@ package garmin
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,22 +29,24 @@ const (
 // Client is a client for Garmin Connect activity endpoints. It is safe for
 // concurrent use provided its Options are not mutated after construction.
 type Client struct {
-	baseURL      *url.URL
-	webURL       *url.URL
-	httpClient   *http.Client
-	tokenMu      sync.Mutex
-	accessToken  string
-	refreshToken string
-	clientID     string
-	tokenFile    string
-	ssoURL       *url.URL
-	tokenURL     *url.URL
-	serviceURL   string
-	portalURL    string
-	authService  string
-	authFlow     string
-	mfaMethod    string
-	loginDelay   func(context.Context) error
+	baseURL        *url.URL
+	webURL         *url.URL
+	httpClient     *http.Client
+	tokenMu        sync.Mutex
+	accessToken    string
+	refreshToken   string
+	clientID       string
+	csrfToken      string
+	browserCookies []BrowserCookie
+	tokenFile      string
+	ssoURL         *url.URL
+	tokenURL       *url.URL
+	serviceURL     string
+	portalURL      string
+	authService    string
+	authFlow       string
+	mfaMethod      string
+	loginDelay     func(context.Context) error
 }
 
 // WithWebBaseURL overrides the connect.garmin.com base URL used by web-only
@@ -108,7 +112,7 @@ func NewClient(accessToken string, options ...Option) (*Client, error) {
 		ssoURL:      mustParseURL("https://sso.garmin.com"),
 		tokenURL:    mustParseURL("https://diauth.garmin.com/di-oauth2-service/oauth/token"),
 		serviceURL:  "https://mobile.integration.garmin.com/gcm/ios",
-		portalURL:   "https://connect.garmin.com/app",
+		portalURL:   "https://connect.garmin.com/app/",
 		loginDelay:  browserLoginDelay,
 	}
 	for _, option := range options {
@@ -215,13 +219,62 @@ func (c *Client) sendGET(ctx context.Context, endpoint *url.URL, accept, token s
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Accept", accept)
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("User-Agent", "go-garminconnect")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	req.Header.Set("User-Agent", "GCM-Android-5.23")
+	req.Header.Set("X-App-Ver", "10861")
+	req.Header.Set("X-Garmin-Client-Platform", "Android")
+	req.Header.Set("X-Garmin-Paired-App-Version", "10861")
+	req.Header.Set("X-Garmin-User-Agent", "com.garmin.android.apps.connectmobile/5.23; ; Google/sdk_gphone64_arm64/google; Android/33; Dalvik/2.1.0")
+	req.Header.Set("X-GCExperience", "GC5")
+	req.Header.Set("X-Lang", "en")
+	if endpoint.Host == c.webURL.Host {
+		c.tokenMu.Lock()
+		csrfToken := c.csrfToken
+		browserCookies := cloneBrowserCookies(c.browserCookies)
+		c.tokenMu.Unlock()
+		req.Header.Del("Authorization")
+		req.Header.Set("Accept", "*/*")
+		req.Header.Set("Connect-Csrf-Token", csrfToken)
+		referer := c.webURL.JoinPath("app/")
+		if marker := strings.LastIndex(endpoint.Path, "/by/connectid/"); marker >= 0 {
+			activityID := strings.TrimPrefix(endpoint.Path[marker:], "/by/connectid/")
+			referer = c.webURL.JoinPath("app/activity", activityID)
+		}
+		req.Header.Set("Referer", referer.String())
+		req.Header.Set("DNT", "1")
+		req.Header.Set("Priority", "u=4")
+		req.Header.Set("Sec-Fetch-Dest", "empty")
+		req.Header.Set("Sec-Fetch-Mode", "cors")
+		req.Header.Set("Sec-Fetch-Site", "same-origin")
+		req.Header.Set("Sec-GPC", "1")
+		req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:154.0) Gecko/20100101 Firefox/154.0")
+		if !hasBrowserCookie(browserCookies, "SESSIONID") {
+			sessionID, err := newGarminSessionID()
+			if err != nil {
+				return nil, err
+			}
+			req.AddCookie(&http.Cookie{Name: "SESSIONID", Value: sessionID})
+		}
+	}
 	response, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("Garmin request: %w", err)
 	}
 	return response, nil
+}
+
+func newGarminSessionID() (string, error) {
+	var id [16]byte
+	if _, err := rand.Read(id[:]); err != nil {
+		return "", fmt.Errorf("generate Garmin session ID: %w", err)
+	}
+	id[6] = id[6]&0x0f | 0x40
+	id[8] = id[8]&0x3f | 0x80
+	uuid := fmt.Sprintf("%x-%x-%x-%x-%x", id[0:4], id[4:6], id[6:8], id[8:10], id[10:16])
+	return base64.RawStdEncoding.EncodeToString([]byte(uuid)), nil
 }
 
 // HTTPError describes an unsuccessful response from Garmin Connect.

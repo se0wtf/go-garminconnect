@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -22,7 +23,10 @@ func testJWT(expires time.Time, clientID string) string {
 
 func TestSaveAndLoadTokens(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "private", "tokens.json")
-	want := Tokens{AccessToken: "access", RefreshToken: "refresh", ClientID: "client"}
+	want := Tokens{
+		AccessToken: "access", RefreshToken: "refresh", ClientID: "client", CSRFToken: "csrf-value",
+		BrowserCookies: []BrowserCookie{{Name: "JWT_WEB", Value: "web-token"}, {Name: "session", Value: "browser-session"}},
+	}
 	if err := SaveTokens(path, want); err != nil {
 		t.Fatal(err)
 	}
@@ -30,7 +34,7 @@ func TestSaveAndLoadTokens(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != want {
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("LoadTokens() = %#v, want %#v", got, want)
 	}
 	info, err := os.Stat(path)
@@ -79,9 +83,11 @@ func TestAutomaticTokenRefreshAndPersistence(t *testing.T) {
 	defer server.Close()
 	tokenURL, _ := url.Parse(server.URL + "/token")
 	client, err := NewClientWithTokens(Tokens{
-		AccessToken:  testJWT(time.Now().Add(-time.Minute), "client"),
-		RefreshToken: "old-refresh",
-		ClientID:     "client",
+		AccessToken:    testJWT(time.Now().Add(-time.Minute), "client"),
+		RefreshToken:   "old-refresh",
+		ClientID:       "client",
+		CSRFToken:      "csrf-value",
+		BrowserCookies: []BrowserCookie{{Name: "session", Value: "browser-session"}},
 	}, WithBaseURL(server.URL), WithHTTPClient(server.Client()), WithTokenFile(tokenPath), func(c *Client) error {
 		c.tokenURL = tokenURL
 		return nil
@@ -97,7 +103,7 @@ func TestAutomaticTokenRefreshAndPersistence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stored.AccessToken != "new-access" || stored.RefreshToken != "new-refresh" {
+	if stored.AccessToken != "new-access" || stored.RefreshToken != "new-refresh" || stored.CSRFToken != "csrf-value" || len(stored.BrowserCookies) != 1 {
 		t.Fatalf("stored tokens = %#v", stored)
 	}
 }

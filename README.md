@@ -43,10 +43,14 @@ CSV formats. `GetDiveDetails` retrieves Garmin Dive-specific data. Full detail
 documents are returned as `json.RawMessage` because Garmin does not publish a
 stable schema for them.
 
-`Login` implements Garmin's undocumented mobile SSO flow. For an account with
-MFA, pass an `MFAProvider` that retrieves a one-time code. `WithTokenFile`
-stores access and refresh tokens with owner-only permissions; clients resumed
-with `NewClientFromTokenFile` refresh expiring tokens automatically.
+`Login` uses Garmin's undocumented browser SSO flow, with the mobile flow as a
+fallback. For an account with MFA, pass an `MFAProvider` that retrieves a
+one-time code. `WithTokenFile` stores API tokens and the authenticated browser
+session with owner-only permissions. Clients resumed with
+`NewClientFromTokenFile` refresh expiring API tokens automatically and can call
+authenticated browser-only endpoints such as `GetDiveDetails` without logging
+in again. If Garmin expires the browser session, `GetDiveDetails` returns
+`ErrSessionExpired` and the application must call `Login` again.
 
 ## Development
 

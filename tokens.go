@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/cookiejar"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -23,12 +25,22 @@ var (
 	ErrNoTokenFile = errors.New("Garmin token file does not exist")
 )
 
-// Tokens contains the credentials needed to resume and refresh a Garmin
-// session. RefreshToken grants persistent account access and must be protected.
+// Tokens contains the credentials needed to resume Garmin API and browser
+// sessions. RefreshToken, CSRFToken, and BrowserCookies grant account access
+// and must be protected.
 type Tokens struct {
-	AccessToken  string `json:"access_token"`
-	RefreshToken string `json:"refresh_token,omitempty"`
-	ClientID     string `json:"client_id,omitempty"`
+	AccessToken    string          `json:"access_token"`
+	RefreshToken   string          `json:"refresh_token,omitempty"`
+	ClientID       string          `json:"client_id,omitempty"`
+	CSRFToken      string          `json:"csrf_token,omitempty"`
+	BrowserCookies []BrowserCookie `json:"browser_cookies,omitempty"`
+}
+
+// BrowserCookie is an authentication cookie required by Garmin's browser-only
+// APIs. Values are secrets and must be protected like refresh tokens.
+type BrowserCookie struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
 }
 
 // WithTokenFile makes the client atomically persist tokens after login and
@@ -56,6 +68,11 @@ func NewClientWithTokens(tokens Tokens, options ...Option) (*Client, error) {
 	c.accessToken = tokens.AccessToken
 	c.refreshToken = tokens.RefreshToken
 	c.clientID = tokens.ClientID
+	c.csrfToken = tokens.CSRFToken
+	c.browserCookies = cloneBrowserCookies(tokens.BrowserCookies)
+	if err := c.restoreBrowserCookies(); err != nil {
+		return nil, err
+	}
 	return c, nil
 }
 
@@ -78,9 +95,11 @@ func (c *Client) Tokens() Tokens {
 
 func (c *Client) tokensLocked() Tokens {
 	return Tokens{
-		AccessToken:  c.accessToken,
-		RefreshToken: c.refreshToken,
-		ClientID:     c.clientID,
+		AccessToken:    c.accessToken,
+		RefreshToken:   c.refreshToken,
+		ClientID:       c.clientID,
+		CSRFToken:      c.csrfToken,
+		BrowserCookies: cloneBrowserCookies(c.browserCookies),
 	}
 }
 
@@ -90,7 +109,35 @@ func (c *Client) setTokens(tokens Tokens) error {
 	c.accessToken = tokens.AccessToken
 	c.refreshToken = tokens.RefreshToken
 	c.clientID = tokens.ClientID
+	c.csrfToken = tokens.CSRFToken
+	c.browserCookies = cloneBrowserCookies(tokens.BrowserCookies)
 	return c.persistTokensLocked()
+}
+
+func cloneBrowserCookies(cookies []BrowserCookie) []BrowserCookie {
+	return append([]BrowserCookie(nil), cookies...)
+}
+
+func (c *Client) restoreBrowserCookies() error {
+	if len(c.browserCookies) == 0 {
+		return nil
+	}
+	if c.httpClient.Jar == nil {
+		jar, err := cookiejar.New(nil)
+		if err != nil {
+			return fmt.Errorf("create Garmin browser cookie jar: %w", err)
+		}
+		c.httpClient.Jar = jar
+	}
+	cookies := make([]*http.Cookie, 0, len(c.browserCookies))
+	for _, cookie := range c.browserCookies {
+		if cookie.Name == "" || cookie.Value == "" {
+			return errors.New("Garmin browser cookie must have a name and value")
+		}
+		cookies = append(cookies, &http.Cookie{Name: cookie.Name, Value: cookie.Value, Path: "/", Secure: c.webURL.Scheme == "https", HttpOnly: true})
+	}
+	c.httpClient.Jar.SetCookies(c.webURL, cookies)
+	return nil
 }
 
 func (c *Client) persistTokensLocked() error {

@@ -21,21 +21,20 @@ func testLoginOptions(server *httptest.Server) []Option {
 		func(c *Client) error {
 			base, _ := url.Parse(server.URL)
 			c.ssoURL = base
+			c.webURL = base
 			c.tokenURL = base.JoinPath("di-oauth2-service/oauth/token")
 			c.serviceURL = server.URL + "/gcm/ios"
-			c.portalURL = server.URL + "/app"
+			c.portalURL = server.URL + "/app/"
 			c.loginDelay = func(context.Context) error { return nil }
 			return nil
 		},
 	}
 }
 
-func TestLoginFallsBackToBrowserFlow(t *testing.T) {
+func TestLoginUsesBrowserFlow(t *testing.T) {
 	var portalGets, portalLogins, portalVerifications int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/mobile/api/login":
-			http.Error(w, `{"error":{"status-code":"429"}}`, http.StatusTooManyRequests)
 		case "/portal/sso/en-US/sign-in":
 			portalGets++
 			if r.Method != http.MethodGet || r.URL.Query().Get("clientId") != portalClientID || r.Header.Get("User-Agent") != portalUserAgent {
@@ -48,7 +47,11 @@ func TestLoginFallsBackToBrowserFlow(t *testing.T) {
 			if cookie, err := r.Cookie("GARMIN-SSO"); err != nil || cookie.Value != "session" {
 				t.Fatal("browser SSO cookie was not retained")
 			}
-			_, _ = w.Write([]byte(`{"responseStatus":{"type":"MFA_REQUIRED"},"customerMfaInfo":{"mfaLastMethodUsed":"email"}}`))
+			if portalLogins == 1 {
+				_, _ = w.Write([]byte(`{"responseStatus":{"type":"MFA_REQUIRED"},"customerMfaInfo":{"mfaLastMethodUsed":"email"}}`))
+			} else {
+				_, _ = w.Write([]byte(`{"responseStatus":{"type":"SUCCESSFUL"},"serviceTicketId":"web-ticket"}`))
+			}
 		case "/portal/api/mfa/verifyCode":
 			portalVerifications++
 			var body map[string]any
@@ -58,15 +61,32 @@ func TestLoginFallsBackToBrowserFlow(t *testing.T) {
 			if body["mfaVerificationCode"] != "654321" || body["mfaMethod"] != "email" {
 				t.Fatal("bad browser MFA payload")
 			}
-			_, _ = w.Write([]byte(`{"responseStatus":{"type":"SUCCESSFUL"},"serviceTicketId":"portal-ticket"}`))
+			_, _ = w.Write([]byte(`{"responseStatus":{"type":"SUCCESSFUL"},"serviceTicketId":"api-ticket"}`))
 		case "/di-oauth2-service/oauth/token":
-			if err := r.ParseForm(); err != nil {
-				t.Fatal(err)
-			}
-			if r.Form.Get("service_ticket") != "portal-ticket" || r.Form.Get("service_url") != "http://"+r.Host+"/app" {
-				t.Fatalf("bad portal token exchange: %#v", r.Form)
+			if err := r.ParseForm(); err != nil || r.Form.Get("service_ticket") != "api-ticket" {
+				t.Fatal("bad DI token exchange")
 			}
 			_, _ = w.Write([]byte(`{"access_token":"access","refresh_token":"refresh"}`))
+		case "/app/":
+			if ticket := r.URL.Query().Get("ticket"); ticket != "" {
+				if ticket != "web-ticket" {
+					t.Fatal("missing portal ticket")
+				}
+				http.SetCookie(w, &http.Cookie{Name: "JWT_WEB", Value: "web-token", Path: "/"})
+				_, _ = w.Write([]byte(`<html><head><meta name="csrf-token" content="csrf-value"></head></html>`))
+			} else {
+				http.SetCookie(w, &http.Cookie{Name: "SESSIONID", Value: "session-id", Path: "/"})
+				_, _ = w.Write([]byte(`<html><head><meta name="csrf-token" content="csrf-value-2"></head></html>`))
+			}
+		case "/services/auth/token/di-oauth/refresh":
+			if r.Header.Get("Connect-Csrf-Token") != "csrf-value" {
+				t.Fatal("missing CSRF token on web refresh")
+			}
+			if cookie, err := r.Cookie("JWT_WEB"); err != nil || cookie.Value != "web-token" {
+				t.Fatal("missing JWT_WEB on web refresh")
+			}
+			http.SetCookie(w, &http.Cookie{Name: "session", Value: "browser-session", Path: "/"})
+			_, _ = w.Write([]byte(`{"expires":4102444800000}`))
 		default:
 			t.Fatalf("unexpected path %s", r.URL.Path)
 		}
@@ -76,10 +96,10 @@ func TestLoginFallsBackToBrowserFlow(t *testing.T) {
 	client, err := Login(context.Background(), "runner@example.com", "correct", func(context.Context) (string, error) {
 		return "654321", nil
 	}, testLoginOptions(server)...)
-	if err != nil || client.accessToken != "access" {
+	if err != nil || client.accessToken != "access" || client.csrfToken != "csrf-value-2" || len(client.browserCookies) != 3 {
 		t.Fatalf("Login() = %#v, %v", client, err)
 	}
-	if portalGets != 1 || portalLogins != 1 || portalVerifications != 1 {
+	if portalGets != 2 || portalLogins != 2 || portalVerifications != 1 {
 		t.Fatalf("portal calls = GET %d login %d MFA %d", portalGets, portalLogins, portalVerifications)
 	}
 }
@@ -87,6 +107,8 @@ func TestLoginFallsBackToBrowserFlow(t *testing.T) {
 func TestLogin(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/portal/sso/en-US/sign-in":
+			http.Error(w, "portal unavailable", http.StatusInternalServerError)
 		case "/mobile/api/login":
 			var body map[string]any
 			_ = json.NewDecoder(r.Body).Decode(&body)
@@ -116,6 +138,8 @@ func TestLogin(t *testing.T) {
 func TestLoginMFA(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/portal/sso/en-US/sign-in":
+			http.Error(w, "portal unavailable", http.StatusInternalServerError)
 		case "/mobile/api/login":
 			_, _ = w.Write([]byte(`{"responseStatus":{"type":"MFA_REQUIRED"},"customerMfaInfo":{"mfaLastMethodUsed":"email"}}`))
 		case "/mobile/api/mfa/verifyCode":
