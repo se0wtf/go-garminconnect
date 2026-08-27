@@ -6,10 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestGetDiveDetails(t *testing.T) {
+	var sessionIDs []string
 	client := testClient(t, func(w http.ResponseWriter, r *http.Request) {
 		if got, want := r.URL.Path, "/gcsalt-api/diving/v1/dive/detail/by/connectid/42"; got != want {
 			t.Fatalf("path = %q, want %q", got, want)
@@ -36,9 +39,13 @@ func TestGetDiveDetails(t *testing.T) {
 		if err != nil || len(decoded) != 36 {
 			t.Fatalf("invalid generated SESSIONID %q", sessionID.Value)
 		}
+		sessionIDs = append(sessionIDs, sessionID.Value)
 		_, _ = w.Write([]byte(`{"diveId":42,"maxDepth":25.4}`))
 	})
 	client.webURL = client.baseURL
+	client.accessToken = testJWT(time.Now().Add(-time.Hour), "expired-client")
+	client.refreshToken = ""
+	client.tokenFile = filepath.Join(t.TempDir(), "tokens.json")
 	client.csrfToken = "csrf-value"
 	client.browserCookies = []BrowserCookie{{Name: "JWT_WEB", Value: "web-token"}, {Name: "session", Value: "browser-session"}}
 	if err := client.restoreBrowserCookies(); err != nil {
@@ -47,6 +54,16 @@ func TestGetDiveDetails(t *testing.T) {
 	details, err := client.GetDiveDetails(context.Background(), 42)
 	if err != nil || !json.Valid(details) {
 		t.Fatalf("GetDiveDetails() = %s, %v", details, err)
+	}
+	if _, err := client.GetDiveDetails(context.Background(), 42); err != nil {
+		t.Fatal(err)
+	}
+	if len(sessionIDs) != 2 || sessionIDs[0] != sessionIDs[1] || !hasBrowserCookie(client.Tokens().BrowserCookies, "SESSIONID") {
+		t.Fatalf("browser SESSIONID was not reused: %v", sessionIDs)
+	}
+	stored, err := LoadTokens(client.tokenFile)
+	if err != nil || !hasBrowserCookie(stored.BrowserCookies, "SESSIONID") {
+		t.Fatalf("generated browser SESSIONID was not persisted: %#v, %v", stored, err)
 	}
 }
 
@@ -74,7 +91,7 @@ func TestGetDiveDetailsExpiredBrowserSession(t *testing.T) {
 	})
 	client.webURL = client.baseURL
 	client.csrfToken = "csrf-value"
-	client.browserCookies = []BrowserCookie{{Name: "session", Value: "expired"}}
+	client.browserCookies = []BrowserCookie{{Name: "session", Value: "expired"}, {Name: "JWT_WEB", Value: "expired"}}
 	if err := client.restoreBrowserCookies(); err != nil {
 		t.Fatal(err)
 	}

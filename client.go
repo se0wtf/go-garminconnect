@@ -180,6 +180,9 @@ func (c *Client) download(ctx context.Context, path string) ([]byte, error) {
 }
 
 func (c *Client) doAuthenticatedGET(ctx context.Context, endpoint *url.URL, accept string) (*http.Response, error) {
+	if endpoint.Host == c.webURL.Host {
+		return c.sendGET(ctx, endpoint, accept, "")
+	}
 	token, err := c.accessTokenForRequest(ctx)
 	if err != nil {
 		return nil, err
@@ -233,7 +236,6 @@ func (c *Client) sendGET(ctx context.Context, endpoint *url.URL, accept, token s
 	if endpoint.Host == c.webURL.Host {
 		c.tokenMu.Lock()
 		csrfToken := c.csrfToken
-		browserCookies := cloneBrowserCookies(c.browserCookies)
 		c.tokenMu.Unlock()
 		req.Header.Del("Authorization")
 		req.Header.Set("Accept", "*/*")
@@ -251,13 +253,6 @@ func (c *Client) sendGET(ctx context.Context, endpoint *url.URL, accept, token s
 		req.Header.Set("Sec-Fetch-Site", "same-origin")
 		req.Header.Set("Sec-GPC", "1")
 		req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:154.0) Gecko/20100101 Firefox/154.0")
-		if !hasBrowserCookie(browserCookies, "SESSIONID") {
-			sessionID, err := newGarminSessionID()
-			if err != nil {
-				return nil, err
-			}
-			req.AddCookie(&http.Cookie{Name: "SESSIONID", Value: sessionID})
-		}
 	}
 	response, err := c.httpClient.Do(req)
 	if err != nil {

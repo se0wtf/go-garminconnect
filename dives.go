@@ -31,10 +31,18 @@ func (c *Client) GetDiveDetails(ctx context.Context, activityID int64) (json.Raw
 
 func (c *Client) ensureBrowserSession() error {
 	c.tokenMu.Lock()
-	ready := c.csrfToken != "" && len(c.browserCookies) != 0
-	c.tokenMu.Unlock()
-	if !ready {
+	defer c.tokenMu.Unlock()
+	if c.csrfToken == "" || !hasBrowserCookie(c.browserCookies, "session") || !hasBrowserCookie(c.browserCookies, "JWT_WEB") {
 		return ErrSessionExpired
 	}
-	return nil
+	if hasBrowserCookie(c.browserCookies, "SESSIONID") {
+		return nil
+	}
+	sessionID, err := newGarminSessionID()
+	if err != nil {
+		return err
+	}
+	c.browserCookies = append(c.browserCookies, BrowserCookie{Name: "SESSIONID", Value: sessionID})
+	c.httpClient.Jar.SetCookies(c.webURL, []*http.Cookie{{Name: "SESSIONID", Value: sessionID, Path: "/", Secure: c.webURL.Scheme == "https", HttpOnly: true}})
+	return c.persistTokensLocked()
 }
